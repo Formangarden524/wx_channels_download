@@ -202,7 +202,7 @@ func build_platform_config_json(config map[string]any, download_dir, filename st
 	return json.Marshal(platform_config)
 }
 
-func task_config_with_download_dir(config_json string, download_dir string) (string, error) {
+func task_config_with_download_dir(config_json string, download_dir string, overwrite_targets map[string]string) (string, error) {
 	task_config := make(map[string]any)
 	if strings.TrimSpace(config_json) != "" {
 		if err := json.Unmarshal([]byte(config_json), &task_config); err != nil {
@@ -213,6 +213,10 @@ func task_config_with_download_dir(config_json string, download_dir string) (str
 		}
 	}
 	task_config["download_dir"] = strings.TrimSpace(download_dir)
+	delete(task_config, hermes.WXChannelsOverwriteTargetsKey)
+	if len(overwrite_targets) > 0 {
+		task_config[hermes.WXChannelsOverwriteTargetsKey] = overwrite_targets
+	}
 	data, err := json.Marshal(task_config)
 	if err != nil {
 		return "", err
@@ -706,14 +710,6 @@ func (s *DownloadTaskService) CreateTask(body CreateDownloadTaskBody) (result *C
 		Bool("duplicate", duplicate).
 		Bool("overwrite", overwrite).
 		Msg("checking download task conflicts")
-	if err := s.check_duplicate(save_dir, info.Task.UniqueID, resource_keys, resource_names, content_type, duplicate, overwrite); err != nil {
-		return nil, err
-	}
-	s.logger.Info().
-		Str("file", "/services/download_task.go").
-		Str("platform", body.Platform).
-		Str("stage", stage).
-		Msg("download task conflict check completed")
 
 	// onTaskCreate hook
 	stage = "invoke_create_hook"
@@ -730,7 +726,24 @@ func (s *DownloadTaskService) CreateTask(body CreateDownloadTaskBody) (result *C
 	if err != nil {
 		return nil, fmt.Errorf("准备下载目录失败: %w", err)
 	}
-	task_config_json, err := task_config_with_download_dir(info.Task.ConfigJSON, save_dir)
+	// Match the finalized output only after resolving the actual download directory.
+	replace_tracked_outputs := body.Platform == "wxchannels" && overwrite && !duplicate && content_type != model.ContentTypeLive
+	var overwrite_targets map[string]string
+	if replace_tracked_outputs {
+		overwrite_targets, err = s.wxchannels_overwrite_targets(save_dir, info.Task.UniqueID, resource_keys)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := s.check_duplicate(save_dir, info.Task.UniqueID, resource_keys, resource_names, content_type, duplicate, overwrite, replace_tracked_outputs); err != nil {
+		return nil, err
+	}
+	s.logger.Info().
+		Str("file", "/services/download_task.go").
+		Str("platform", body.Platform).
+		Str("stage", stage).
+		Msg("download task conflict check completed")
+	task_config_json, err := task_config_with_download_dir(info.Task.ConfigJSON, save_dir, overwrite_targets)
 	if err != nil {
 		return nil, fmt.Errorf("保存任务下载目录失败: %w", err)
 	}
@@ -981,7 +994,7 @@ func (s *DownloadTaskService) CreateTaskByURL(body CreateDownloadTaskByURLBody) 
 	if err != nil {
 		return nil, fmt.Errorf("构建下载配置失败: %w", err)
 	}
-	task_config_json, err := task_config_with_download_dir(string(url_config_json), download_dir)
+	task_config_json, err := task_config_with_download_dir(string(url_config_json), download_dir, nil)
 	if err != nil {
 		return nil, fmt.Errorf("保存任务下载目录失败: %w", err)
 	}
@@ -3146,7 +3159,35 @@ func (s *DownloadTaskService) resolve_save_dir(requested string) (string, error)
 	return download_dir, nil
 }
 
-func (s *DownloadTaskService) check_duplicate(save_dir string, task_unique_id string, resource_keys []string, resource_names []string, content_type string, duplicate bool, overwrite bool) error {
+// wxchannels_overwrite_targets identifies existing files owned by the same
+// video and resource variant. Older records remain useful after a failed retry.
+func (s *DownloadTaskService) wxchannels_overwrite_targets(save_dir, task_unique_id string, resource_keys []string) (map[string]string, error) {
+	targets := make(map[string]string)
+	if task_unique_id == "" {
+		return targets, nil
+	}
+	var rows []model.DownloadResource
+	err := s.db.Table("download_resource AS resource").
+		Select("resource.unique_id, resource.name").
+		Joins("JOIN download_task AS task ON task.id = resource.task_id").
+		Where("task.platform_id = ? AND task.unique_id = ? AND task.status = ?", "wxchannels", task_unique_id, model.TaskStatusFinished).
+		Where("resource.download_dir = ? AND resource.status = 2 AND resource.unique_id IN ?", save_dir, resource_keys).
+		Order("resource.id DESC").Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("核对待覆盖的原文件失败: %w", err)
+	}
+	for _, row := range rows {
+		if row.UniqueID == "" || targets[row.UniqueID] != "" {
+			continue
+		}
+		if _, err := hermes.TrackedOverwritePath(save_dir, row.Name); err == nil {
+			targets[row.UniqueID] = row.Name
+		}
+	}
+	return targets, nil
+}
+
+func (s *DownloadTaskService) check_duplicate(save_dir string, task_unique_id string, resource_keys []string, resource_names []string, content_type string, duplicate bool, overwrite bool, replace_tracked_outputs bool) error {
 	if duplicate {
 		return nil
 	}
@@ -3258,6 +3299,9 @@ func (s *DownloadTaskService) check_duplicate(save_dir string, task_unique_id st
 	}
 
 	for _, name := range resource_names {
+		if replace_tracked_outputs {
+			break // Keep the original file until the replacement is complete.
+		}
 		file_path := filepath.Join(save_dir, filepath.Base(name))
 		if file_info, err := os.Stat(file_path); err == nil && !file_info.IsDir() {
 			if existing_task_name == "" {

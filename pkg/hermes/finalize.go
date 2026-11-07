@@ -74,7 +74,9 @@ func (d *HermesEngine) finish_task(job *TaskJob) error {
 
 	// 5. Rename files from unique_id-based names to display names,
 	// then apply filename template and hook for the final output name.
-	d.finalize_resource_filenames(job)
+	if err := d.finalize_resource_filenames(job); err != nil {
+		return err
+	}
 
 	// 6. Persist the final Resource values. Postprocessing and filename
 	// finalization may have changed Name, MIME Kind and Size. Extension is
@@ -264,12 +266,45 @@ func BuildFinalResourceName(input FinalResourceNameInput) FinalResourceNameResul
 	return result
 }
 
+const WXChannelsOverwriteTargetsKey = "wxchannels_overwrite_targets"
+
+// TrackedOverwritePath accepts only regular files within the recorded download
+// directory and rejects symlinks below that directory.
+func TrackedOverwritePath(download_dir, name string) (string, error) {
+	name = filepath.Clean(name)
+	if !filepath.IsAbs(download_dir) || name == "." || name == ".." ||
+		filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("无效的覆盖路径")
+	}
+	root, err := filepath.EvalSymlinks(download_dir)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(root, name)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved != path {
+		return "", fmt.Errorf("不能覆盖符号链接")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("覆盖目标不是普通文件")
+	}
+	return path, nil
+}
+
 // finalizeResourceFilenames renames downloaded files from unique_id-based names
 // to human-readable resource names, then applies filename template and hooks to
 // produce the final output filename. This is done after download and
 // postprocessing so that templates/hooks work on clean display names instead of
 // internal unique IDs.
-func (d *HermesEngine) finalize_resource_filenames(job *TaskJob) {
+func (d *HermesEngine) finalize_resource_filenames(job *TaskJob) error {
+	targets, _ := job.Config[WXChannelsOverwriteTargetsKey].(map[string]any)
 	for i := range job.Resources {
 		r := &job.Resources[i]
 		if strings.TrimSpace(r.DownloadDir) == "" {
@@ -331,6 +366,26 @@ func (d *HermesEngine) finalize_resource_filenames(job *TaskJob) {
 		if old_path == "" {
 			old_path = d.abs_file_path(resource_path, r.UniqueID)
 		}
+		if job.Platform == "wxchannels" && get_config_bool(job.Config, "overwrite") &&
+			!get_config_bool(job.Config, "duplicate") {
+			if name, _ := targets[r.UniqueID].(string); name != "" {
+				target, err := TrackedOverwritePath(resource_path, name)
+				if err != nil {
+					return fmt.Errorf("覆盖前核验原文件失败: %w", err)
+				}
+				if err := os.Rename(old_path, target); err != nil {
+					return fmt.Errorf("替换原文件失败: %w", err)
+				}
+				r.Name, r.FilePath = name, target
+				continue
+			}
+			target := d.abs_file_path(resource_path, preferred_name)
+			if filepath.Clean(old_path) != filepath.Clean(target) {
+				if _, err := os.Lstat(target); !os.IsNotExist(err) {
+					return fmt.Errorf("已有同名文件，但无法核实它属于此视频，已停止覆盖: %s", target)
+				}
+			}
+		}
 		final_name := preferred_name
 		if filepath.Clean(old_path) != filepath.Clean(d.abs_file_path(resource_path, preferred_name)) {
 			var resolve_err error
@@ -377,6 +432,7 @@ func (d *HermesEngine) finalize_resource_filenames(job *TaskJob) {
 		r.Name = final_name
 		r.FilePath = new_path
 	}
+	return nil
 }
 
 func final_output_name(base_name, ext string) string {

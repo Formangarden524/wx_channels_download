@@ -62,67 +62,55 @@
           });
           return;
         }
-        let download_open = false;
+        const feeds = new Map();
+        const seen_markers = new Set();
         let next_marker = "";
-        let has_more = true;
-        let created_task_ids = [];
-        while (has_more) {
-          if (stop_signal) {
-            has_more = false;
-            break;
-          }
-          var payload = {
+        while (!stop_signal) {
+          const r = await WXU.API.finderUserPage({
             username: queries.username,
             finderUsername: my_username || queries.username,
             lastBuffer: next_marker,
             needFansCount: 0,
             objectId: "0",
-          };
-          WXU.log
-            .Info()
-            .Str("file", "channels.profile.js")
-            .JSON("payload", payload)
-            .Msg("before WXU.API.finderUserPage");
-          var r = await WXU.API.finderUserPage(payload);
-          if (r.errCode !== 0) {
-            WXU.error({
-              source: "channels.profile.js:88",
-              msg: r.errMsg,
-              alert: 0,
-            });
-            has_more = false;
-            return;
-          }
-          const feeds = r.data.object;
-          var [err, data] = await WXU.downloader.create(feeds, {
-            platform: "wxchannels",
-            ignore_live_feed: true,
           });
-          if (err) {
-            WXU.error({ source: "channels.profile.js:107", msg: err.message });
-            has_more = false;
-            return;
+          if (r.errCode !== 0 || !Array.isArray(r.data?.object)) {
+            throw new Error(r.errMsg || "未能读取账号作品");
           }
-          if (!WXU.config.downloadForceCheckAllFeeds && data.ids.length === 0) {
-            if (created_task_ids.length === 0) {
-              return;
+          for (const feed of r.data.object) {
+            if (feed.id == null || feed.id === "") {
+              throw new Error("作品缺少视频 ID，未提交批量下载");
             }
-            continue;
+            feeds.set(String(feed.id), feed);
           }
-          created_task_ids.push(...data.ids);
-          if (!download_open) {
-            download_open = true;
-            WXU.downloader.show();
+          if (r.data.continueFlag === 0) {
+            break;
           }
-          if (!r.data.lastBuffer || r.data.object.length < 15) {
-            has_more = false;
-            if (created_task_ids.length === 0) {
-              return;
-            }
-            return;
+          const marker = r.data.lastBuffer;
+          if (r.data.continueFlag !== 1 || !marker || seen_markers.has(marker)) {
+            throw new Error("作品分页异常，未提交批量下载");
           }
-          next_marker = r.data.lastBuffer;
+          seen_markers.add(marker);
+          next_marker = marker;
         }
+        if (stop_signal) return;
+        if (feeds.size === 0) {
+          WXU.toast("该账号没有可下载的作品");
+          return;
+        }
+
+        // Resolve conflicts once after scanning all pages. A page of already
+        // downloaded videos says nothing about whether later pages exist.
+        const [err, data] = await WXU.downloader.create([...feeds.values()], {
+          platform: "wxchannels",
+          ignore_live_feed: true,
+        });
+        if (data?.ids?.length) WXU.downloader.show();
+        if (err) throw err;
+        if (!data?.awaiting_conflicts) {
+          WXU.toast(`已扫描 ${feeds.size} 条，创建 ${data?.ids?.length || 0} 个下载任务`);
+        }
+      } catch (error) {
+        WXU.error({ source: "channels.profile.js", msg: error.message || String(error) });
       } finally {
         stop_loading();
       }

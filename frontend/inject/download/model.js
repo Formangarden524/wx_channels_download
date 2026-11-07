@@ -3360,14 +3360,14 @@ function DownloaderPanelViewModel(props = {}) {
       const conflicts = collect_duplicate_conflicts(data, body);
       conflict_tasks_.as(conflicts);
       if (conflicts.length) {
-        if (conflicts.length === 1) {
+        if (body.objects.length === 1) {
           duplicated_feed_prepare_download = body;
           overwrite_error_.as("");
           ui.overwriteConfirmDialog$.show();
-          return [null, { skipped: true }];
+          return [null, { ...data, awaiting_conflicts: true, skipped: true }];
         }
         begin_duplicate_download_confirm(body, conflicts);
-        return [null, { skipped: true }];
+        return [null, { ...data, awaiting_conflicts: true, skipped: true }];
       }
       const task_error = download_task_create_result_error(
         data,

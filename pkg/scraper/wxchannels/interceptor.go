@@ -231,8 +231,9 @@ func NewInterceptorPlugins(cfg InterceptorConfig, logger *zerolog.Logger) []*ech
 					url_build("/inject/components.js", version_query),
 					url_build("/public/virtual-list-view.js", version_query),
 				)
+				local_batch_revision := url.Values{"v": {version + "-batchfix1"}}
 				append_scripts(
-					url_build("/inject/download/model.js", version_query),
+					url_build("/inject/download/model.js", local_batch_revision),
 					url_build("/inject/download/view.js", version_query),
 					url_build("/inject/download/panel.js", version_query),
 				)
@@ -263,7 +264,7 @@ func NewInterceptorPlugins(cfg InterceptorConfig, logger *zerolog.Logger) []*ech
 					append_scripts(asset_url(asset_base_url, "/inject/channels.live.js", version_query))
 				}
 				if pathname == "/web/pages/profile" {
-					append_scripts(asset_url(asset_base_url, "/inject/channels.profile.js", version_query))
+					append_scripts(asset_url(asset_base_url, "/inject/channels.profile.js", local_batch_revision))
 				}
 				html = strings.Replace(html, "<head>", "<head>\n"+injected.String(), 1)
 				ctx.SetResponseBody(html)
