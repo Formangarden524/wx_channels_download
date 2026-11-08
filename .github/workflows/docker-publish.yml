@@ -63,6 +63,7 @@ jobs:
               exit 1
               ;;
           esac
+          IMAGE_NAME="${IMAGE_NAME,,}"
           echo "image=${REGISTRY}/${IMAGE_NAME}:${tag}" >> "$GITHUB_OUTPUT"
           echo "latest_image=${REGISTRY}/${IMAGE_NAME}:latest" >> "$GITHUB_OUTPUT"
 
