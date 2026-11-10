@@ -19,6 +19,23 @@ proxy:
 - `port` 代理端口
 - `tun` 是否启用 TUN 模式
 
+## macOS 已有视频号转发规则时启动失败
+
+如果 API 服务短暂启动后退出，终端出现「设置 HTTP 代理失败，exit status 14」，请检查下载器是否正在尝试修改 macOS 的系统代理。
+
+如果你已通过 macOS 自动代理配置（PAC）或其他工具将视频号请求转发到 `127.0.0.1:2023`，请在**当前解压目录**的 `config.yaml` 中修改已有的 `proxy` 段：
+
+```yaml
+proxy:
+  enabled: true
+  system: false
+  hostname: "127.0.0.1"
+  port: 2023
+  tun: false
+```
+
+保存后重新启动下载器，确认 API 服务和代理服务均已启动，再重新打开视频号页面。对于使用 iKuuu TUN 和 macOS PAC 的用户，由 PAC 将视频号请求发给下载器。其他请求沿用现有网络路由。仅关闭 `proxy.system` 不会自动建立转发规则。
+
 ## TUN 模式
 
 TUN 模式在网络层截获流量，无需修改系统代理即可将目标域名的请求转发到代理服务。适用于不希望改动系统代理，或需要代理非 HTTP 流量的场景。
